@@ -1,0 +1,132 @@
+https://hooks.slack.com/services/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
+
+
+squ_a8fe3d9bd91536d347a89b62758f4c9cf89d47ed
+
+
+
+
+
+
+
+pipeline {
+    agent any
+
+    tools {
+        nodejs "nodejs"
+    }
+
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+        SLACK_WEBHOOK = credentials('slack-token') // Securely injected webhook
+    }
+
+    stages {
+        stage ("clean workspace") {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('git checkout') {
+            steps {
+                checkout scmGit(
+                    branches: [[name: '*/master']],
+                    extensions: [],
+                    userRemoteConfigs: [[
+                        credentialsId: 'git-cred',
+                        url: 'https://github.com/rajeshdondapati1122/DevOps-Project-Zomato-Kastro.git'
+                    ]]
+                )
+            }
+        }
+        
+        stage("Sonarqube Analysis"){
+            steps{
+                withSonarQubeEnv('sonar') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=zomato \
+                    -Dsonar.projectKey=zomato '''
+                }
+            }
+        }
+        stage("Code Quality Gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar' 
+                }
+            } 
+        }
+
+        stage('install dependencies') {
+            steps {
+                sh 'npm install'
+            }
+        }
+
+        stage ("Trivy File Scan") {
+            steps {
+                sh "trivy fs . -o trivy.txt"
+            }
+        }
+
+        stage ("docker login") {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'doc-cred', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]) {
+                    sh "docker login -u $USERNAME -p $PASSWORD"
+                }
+            }
+        }
+
+        stage ("Docker build") {
+            steps {
+                sh "docker build -t rajeshdondapati309/nodejs-app1:v1 ."
+            }
+        }
+
+        stage('Docker Image Scan') {
+            steps {
+                sh "trivy image --format table -o trivy-image-report.html rajeshdondapati309/nodejs-app1:v1"
+                sh " cat trivy-image-report.html"
+            }
+        }
+
+        stage ("Docker push") {
+            steps {
+                sh "docker push rajeshdondapati309/nodejs-app1:v1"
+                sh "docker run -itd -p 3007:3000 rajeshdondapati309/nodejs-app1:v1"
+            }
+        }
+        
+        stage('Archive Trivy Report') {
+            steps {
+                archiveArtifacts artifacts: 'trivy-image-report.html', followSymlinks: false
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def msg = "✅ *Success:* Job *${env.JOB_NAME}* #${env.BUILD_NUMBER} completed successfully."
+                sendSlackMessage(msg)
+            }
+        }
+        failure {
+            script {
+                def msg = "❌ *Failure:* Job *${env.JOB_NAME}* #${env.BUILD_NUMBER} failed."
+                sendSlackMessage(msg)
+            }
+        }
+    }
+}
+
+// Reusable Slack function
+def sendSlackMessage(String message) {
+    def payload = groovy.json.JsonOutput.toJson([text: message])
+    httpRequest(
+        httpMode: 'POST',
+        url: env.SLACK_WEBHOOK,
+        requestBody: payload,
+        contentType: 'APPLICATION_JSON'
+    )
+}
